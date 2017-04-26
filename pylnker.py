@@ -223,10 +223,10 @@ file_hash[9][1] = "FILE_ATTRIBUTE_SPARSE_FILE"
 file_hash[10][1] = "FILE_ATTRIBUTE_REPARSE_POINT"
 file_hash[11][1] = "FILE_ATTRIBUTE_COMPRESSED"
 file_hash[12][1] = "FILE_ATTRIBUTE_OFFLINE"
-file_hash[13][1] = "FILE_ATTRIBUTE_NOT_CONTENT_INDEXED" #need to test
-file_hash[14][1] = "FILE_ATTRIBUTE_ENCRYPTED" #need to test
-file_hash[15][1] = "Unknown (seen on Windows 95 fat)" #need to test
-file_hash[16][1] = "FILE_ATTRIBUTE_VIRTUAL (reserved for future use)" #need to test
+file_hash[13][1] = "FILE_ATTRIBUTE_NOT_CONTENT_INDEXED"
+file_hash[14][1] = "FILE_ATTRIBUTE_ENCRYPTED"
+file_hash[15][1] = "Unknown (seen on Windows 95 fat)"
+file_hash[16][1] = "FILE_ATTRIBUTE_VIRTUAL (reserved for future use)"
 
 # Hash of show_command values
 show_command_hash = [[""] for _ in xrange(11)]
@@ -256,6 +256,11 @@ drive_type_hash[6] = "RAM Drive"
 link_info_flags_hash = [["",""] for _ in xrange(2)]
 link_info_flags_hash[0][1] = "VolumeIDAndLocalBasePath"
 link_info_flags_hash[1][1] = "CommonNetworkRelativeLinkAndPathSuffix"
+
+# Has of Network Relative Link Flags
+nrl_flags_hash = [["",""] for _ in xrange(2)]
+nrl_flags_hash[0][1] = "ValidDevice"
+nrl_flags_hash[1][1] = "ValidNetType"
 
 def reverse_hex(hexdate):
     hex_vals = [hexdate[i:i + 2] for i in xrange(0, 16, 2)]
@@ -399,8 +404,16 @@ def parse_shell_link_header(filename, f, flags):
     # File Attributes 4bytes@18h = 24d
     # Only a non-zero if "Flag bit 1" above is set to 1
     if flags[1] == "1":
-        file_attrib = read_unpack_bin(f, 24, 2)
-        lnk_info['file_attrib'] = file_hash[file_attrib.index("1")][1]
+        file_attrib = read_unpack_bin(f, 24, 4)
+        file_desc = list()
+        
+        for cnt in xrange(len(file_attrib)-15):
+            bit = int(file_attrib[cnt])
+            # grab the description for this bit
+            file_desc.append(file_hash[cnt][bit])
+        file_desc = filter(None, file_desc)
+        
+        lnk_info['file_attrib'] = file_desc
 
     # Create time 8bytes @ 1ch = 28
     creation_time = int(reverse_hex(read_unpack(f, 28, 8)), 16)
@@ -486,13 +499,20 @@ def parse_linkinfo(lnk_info, f, struct_end):
     
     # File location flags
     link_info_flags = read_unpack_bin(f, link_info_flags, 1)
-    lnk_info['linkinfo_flags'] = link_info_flags_hash[link_info_flags.index("1")][1]
+    flag_desc = list()
+    
+    for cnt in xrange(len(link_info_flags)-6):
+        bit = int(link_info_flags[cnt])
+        # grab the description for this bit
+        flag_desc.append(link_info_flags_hash[cnt][bit])
+    flag_desc = filter(None, flag_desc)
+    lnk_info['linkinfo_flags'] = flag_desc
 
     lnk_info['target_location'] = "UNKNOWN"
     # VolumeID structure
     # Random garbage if bit0 is clear in volume flags
-    if link_info_flags[:2] == "10":
-        lnk_info['target_location'] = 'local volume'
+    if link_info_flags[0:1] == "1":
+        lnk_info['target_location_local'] = 'local volume'
 
         # This is the offset of the local volume table within the 
         # File Info Location Structure
@@ -546,19 +566,30 @@ def parse_linkinfo(lnk_info, f, struct_end):
 
     # Network Volume Table
     # Need to test
-    elif link_info_flags[:2] == "01":
+    if link_info_flags[1:2] == "1":
         # TODO: test this section!
-        lnk_info['target_location'] = 'network share'
+        lnk_info['target_location_network'] = 'network share'
 
         net_vol_off_hex = reverse_hex(read_unpack(f, common_network_relative_link_off, 4))
         common_network_relative_link_off = struct_start + int(net_vol_off_hex, 16)
         # net_vol_len_hex = reverse_hex(read_unpack(f, common_network_relative_link_off, 4))
         # net_vol_len = struct_start + int(net_vol_len_hex, 16)
 
+        # CommonNetworkRelativeLinkFlags
+        network_relative_link_flags_loc = common_network_relative_link_off + 4
+        network_relative_link_flags = read_unpack_bin(f, network_relative_link_flags_loc, 4)
+        flag_desc = list()
+
+        for cnt in xrange(len(network_relative_link_flags)-30):
+            bit = int(network_relative_link_flags[cnt])
+            # grab the description for this bit
+            flag_desc.append(nrl_flags_hash[cnt][bit])
+        flag_desc = filter(None, flag_desc)
+        lnk_info['nrl_flags'] = flag_desc
+        
         # Network Share Name
         net_share_name_off = common_network_relative_link_off + 8
-        net_share_name_loc_hex = reverse_hex(read_unpack(
-            f, net_share_name_off, 4))
+        net_share_name_loc_hex = reverse_hex(read_unpack(f, net_share_name_off, 4))
         net_share_name_loc = int(net_share_name_loc_hex, 16)
 
         if net_share_name_loc != 20:
@@ -626,8 +657,111 @@ def parse_string_data(lnk_info, f, flags, struct_end):
     
     return lnk_info, struct_end
 
-def parse_console_data_block():
-    pass
+def parse_console_data_block(lnk_info, consoldatablock_off, f):
+    lnk_info['console_data_block'] = "True"
+    fill_attributes_loc = consoldatablock_off+4
+    popup_fill_attributes_loc = consoldatablock_off+6
+    
+    screen_buffer_size_x_loc = consoldatablock_off+8
+    screen_buffer_size_x_hex = reverse_hex(read_unpack(f, screen_buffer_size_x_loc, 2))
+    screen_buffer_size_x = int(screen_buffer_size_x_hex, 16)
+    lnk_info['screen_buffer_size_x'] = screen_buffer_size_x
+    
+    screen_buffer_size_y_loc = consoldatablock_off+10
+    screen_buffer_size_y_hex = reverse_hex(read_unpack(f, screen_buffer_size_y_loc, 2))
+    screen_buffer_size_y = int(screen_buffer_size_y_hex, 16)
+    lnk_info['screen_buffer_size_y'] = screen_buffer_size_y
+    
+    window_size_x_loc = consoldatablock_off+12
+    window_size_x_hex = reverse_hex(read_unpack(f, window_size_x_loc, 2))
+    window_size_x = int(window_size_x_hex, 16)
+    lnk_info['window_size_x'] = window_size_x
+    
+    window_size_y_loc = consoldatablock_off+14
+    window_size_y_hex = reverse_hex(read_unpack(f, window_size_y_loc, 2))
+    window_size_y = int(window_size_y_hex, 16)
+    lnk_info['window_size_y'] = window_size_y
+    
+    window_origin_x_loc = consoldatablock_off+16
+    window_origin_x_hex = reverse_hex(read_unpack(f, window_origin_x_loc, 2))
+    window_origin_x = int(window_origin_x_hex, 16)
+    lnk_info['window_origin_x'] = window_origin_x
+    
+    window_origin_y_loc = consoldatablock_off+18
+    window_origin_y_hex = reverse_hex(read_unpack(f, window_origin_y_loc, 2))
+    window_origin_y = int(window_origin_y_hex, 16)
+    lnk_info['window_origin_y'] = window_origin_y
+    
+    font_size_loc = consoldatablock_off+28
+    font_size_hex = read_unpack(f, font_size_loc, 4)
+    font_size_hex = [reverse_hex(font_size_hex[0:4]), reverse_hex(font_size_hex[4:8])]
+    font_size_hex = ''.join(font_size_hex)
+    font_size = int(font_size_hex, 16)
+    lnk_info['font_size'] = font_size
+    
+    font_family_loc = consoldatablock_off+32
+    
+    font_weight_loc = consoldatablock_off+36
+    font_weight_hex = reverse_hex(read_unpack(f, font_weight_loc, 4))
+    font_weight = int(font_weight_hex, 16)
+    is_bold = font_weight >= 700
+    lnk_info['is_bold'] = is_bold
+    
+    face_name_loc = consoldatablock_off+40
+    
+    cursor_size_loc = consoldatablock_off+104
+    cursor_size_hex = reverse_hex(read_unpack(f, cursor_size_loc, 4))
+    cursor_size = int(cursor_size_hex, 16)
+    if cursor_size <= 25:
+        lnk_info['cursor_size'] = "Small"
+        
+    elif cursor_size > 25 and cursor_size <= 50:
+        lnk_info['cursor_size'] = "Normal"
+        
+    elif cursor_size > 50 and cursor_size <= 100:
+        lnk_info['cursor_size'] = "Large"
+        
+    full_screen_loc = consoldatablock_off+108
+    full_screen_hex = reverse_hex(read_unpack(f, full_screen_loc, 4))
+    full_screen = int(full_screen_hex, 16)
+    is_full_screen = full_screen > 0
+    lnk_info['is_full_screen'] = is_full_screen
+    
+    quick_edit_loc = consoldatablock_off+112
+    quick_edit_hex = reverse_hex(read_unpack(f, quick_edit_loc, 4))
+    quick_edit = int(quick_edit_hex, 16)
+    is_quick_edit = quick_edit > 0
+    lnk_info['is_quick_edit'] = is_quick_edit
+    
+    insert_mode_loc = consoldatablock_off+116
+    insert_mode_hex = reverse_hex(read_unpack(f, insert_mode_loc, 4))
+    insert_mode = int(insert_mode_hex, 16)
+    is_insert_mode = insert_mode > 0
+    lnk_info['is_insert_mode'] = is_insert_mode
+    
+    auto_position_loc = consoldatablock_off+120
+    auto_position_hex = reverse_hex(read_unpack(f, auto_position_loc, 4))
+    auto_position = int(auto_position_hex, 16)
+    is_auto_position = auto_position > 0
+    lnk_info['is_auto_position'] = is_auto_position
+    
+    history_buffer_size_loc = consoldatablock_off+124
+    history_buffer_size_hex = reverse_hex(read_unpack(f, history_buffer_size_loc, 4))
+    history_buffer_size = int(history_buffer_size_hex, 16)
+    lnk_info['history_buffer_size'] = history_buffer_size
+    
+    history_buffer_count_loc = consoldatablock_off+128
+    history_buffer_count_hex = reverse_hex(read_unpack(f, history_buffer_count_loc, 4))
+    history_buffer_count = int(history_buffer_count_hex, 16)
+    lnk_info['history_buffer_count'] = history_buffer_count
+    
+    history_nodup_loc = consoldatablock_off+132
+    history_nodup_hex = reverse_hex(read_unpack(f, history_nodup_loc, 4))
+    history_nodup = int(history_nodup_hex, 16)
+    is_history_nodup = history_nodup > 0
+    lnk_info['is_history_nodup'] = is_history_nodup
+    
+    return lnk_info
     
 def parse_console_fe_data_block():
     pass
@@ -776,7 +910,8 @@ def parse_extra_data(lnk_info, f):
 #    print "vistaandaboveidlidtdatablock_off: " + str(vistaandaboveidlidtdatablock_off) + "\n" 
 
     if consoldatablock_off > 0:
-        print 'consoldatablock'
+        print 'consoldatablock(not complete)'
+        parse_console_data_block(lnk_info, consoldatablock_off, f)
         
     if consolfedatablock_off > 0:
         print 'consolfedatablock'
@@ -817,7 +952,7 @@ def format_output(lnk_info):
     output += (Fore.MAGENTA+Style.BRIGHT + "\nshell_link_header\n" + Style.RESET_ALL)
     output += "Link Flags: " + ", ".join(lnk_info['link flags']) + "\n"
     if 'file_attrib' in lnk_info:
-        output += "File Attributes: " + lnk_info['file_attrib'] + "\n"
+        output += "File Attributes: " + ", ".join(lnk_info['file_attrib']) + "\n"
     output += "Creation Time: " + str(lnk_info['creation_time']) + "\n"
     output += "Access Time: " + str(lnk_info['access_time']) + "\n"
     output += "Write Time: " + str(lnk_info['write_time']) + "\n"
@@ -833,20 +968,23 @@ def format_output(lnk_info):
         output += (Fore.MAGENTA+Style.BRIGHT + "\nlinkinfo\n" + Style.RESET_ALL)
 #        if lnk_info['LinkInfoHeaderSize'] <= '36':
 #            output += "LinkInfoHeaderSize: " + lnk_info['LinkInfoHeaderSize'] + "\n"
-        output += "LinkInfoFlags: " + lnk_info['linkinfo_flags'] + "\n"
+        output += "LinkInfoFlags: " + ", ".join(lnk_info['linkinfo_flags']) + "\n"
 #    output += "Target is on: %s\n" % lnk_info['target_location']
         output += (Fore.MAGENTA+Style.BRIGHT + "\nvolumeid\n" + Style.RESET_ALL)
-        if lnk_info['target_location'] == 'local volume':
+        if lnk_info['target_location_local'] == 'local volume':
             output += "Drive Type: %s\n" % lnk_info['drive_type']
             output += "DriveSerialNumber: " + str(lnk_info['drive_serial_number']) + "\n"
 #            output += "VolumeLabelOffset: " + lnk_info['VolumeLabelOffset'] + "\n"
             output += "Volume Label: " + str(lnk_info['volume_label']) + "\n"
             output += "Base Path: " + str(lnk_info['base_path']) + "\n"
 
-#            if lnk_info['target_location'] == 'network share':
-#                output += "Network Share Name: %s\n" % lnk_info['net_share_name']
-#                if 'mapped_drive' in lnk_info:
-#                    output += "Mapped Drive: %s\n" % lnk_info['mapped_drive']
+        if lnk_info['target_location_network'] == 'network share':
+            output += (Fore.MAGENTA+Style.BRIGHT + "\nCommonNetworkRelativeLink\n" + Style.RESET_ALL)
+            output += (Fore.RED+Style.BRIGHT + "NOT DONE\n" + Style.RESET_ALL)
+            output += "Network Share Flags: " + ", ".join(lnk_info['nrl_flags']) + "\n"
+            output += "Network Share Name: %s\n" % lnk_info['net_share_name']
+            if 'mapped_drive' in lnk_info:
+                output += "Mapped Drive: %s\n" % lnk_info['mapped_drive']
         
 #        output += "(App Path:) Remaining Path: "+str(
 #            lnk_info['remaining_path']) + "\n"
@@ -865,6 +1003,25 @@ def format_output(lnk_info):
         output += "relative_path: %s\n" % lnk_info['relative_path']
 
     output += (Fore.MAGENTA+Style.BRIGHT + "\nextra_data\n" + Style.RESET_ALL)
+    
+    if 'console_data_block' in lnk_info:
+        output += (Fore.MAGENTA+Style.BRIGHT + "\nConsolDataBlock\n" + Style.RESET_ALL)
+        output += "Fill Attributes: " + (Fore.RED+Style.BRIGHT + "NOT DONE\n" + Style.RESET_ALL)
+        output += "Popup Attributes: " + (Fore.RED+Style.BRIGHT + "NOT DONE\n" + Style.RESET_ALL)
+        output += "Buffer Size (Width x Hight): " + str(lnk_info['screen_buffer_size_x']) + " x " + str(lnk_info['screen_buffer_size_y']) + "\n"
+        output += "Window Size (Width x Hight): " + str(lnk_info['window_size_x']) + " x " + str(lnk_info['window_size_y']) + "\n"
+        output += "Origin (X/Y): " + str(lnk_info['window_origin_x']) + "/" + str(lnk_info['window_origin_y']) + "\n"
+        output += "Font Size: " + str(lnk_info['font_size']) + "\n"
+        output += "Is Bold: " + str(lnk_info['is_bold']) + "\n"
+        output += "Face Name: " + (Fore.RED+Style.BRIGHT + "NOT DONE\n" + Style.RESET_ALL)
+        output += "Cursor Size: " + lnk_info['cursor_size'] + "\n"
+        output += "Is Full Screen: " + str(lnk_info['is_full_screen']) + "\n"
+        output += "Is Quick Edit: " + str(lnk_info['is_quick_edit']) + "\n"
+        output += "Is Insert Mode: " + str(lnk_info['is_insert_mode']) + "\n"
+        output += "Is Auto Positioned: " + str(lnk_info['is_auto_position']) + "\n"
+        output += "History Buffer Size: " + str(lnk_info['history_buffer_size']) + "\n"
+        output += "History Buffer Count: " + str(lnk_info['history_buffer_count']) + "\n"
+        output += "History Duplicates Allowed: " + str(lnk_info['is_history_nodup']) + "\n"
     
     if 'evd_target_ansi' in lnk_info:
         output += (Fore.MAGENTA+Style.BRIGHT + "\nEnvironmentVariableDataBlock\n" + Style.RESET_ALL)
